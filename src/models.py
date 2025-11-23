@@ -20,8 +20,19 @@ class Regular_NN(nn.Module):
     
     def train_model(self, t: torch.Tensor, y: torch.Tensor, 
                     criterion, optimizer,
-                    num_epochs=1000):
+                    num_epochs=1000,
+                    device: str = None):
 
+        if optimizer is None or criterion is None:
+            raise ValueError("Please provide optimizer and criterion to train_model")
+
+        # infer device from model if not provided
+        device = torch.device(device) if device else next(self.parameters()).device
+        self.to(device)
+        t = t.to(device)
+        y = y.to(device)
+
+        history = {'loss': []}
         for epoch in range(num_epochs):
             self.train()
             optimizer.zero_grad()
@@ -30,8 +41,10 @@ class Regular_NN(nn.Module):
             loss.backward()
             optimizer.step()
             
+            history['loss'].append(loss.item())
             if (epoch+1) % 100 == 0:
                 print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
+        return history
 
 class PINN(nn.Module):
     def __init__(self):
@@ -48,8 +61,9 @@ class PINN(nn.Module):
         return self.net(t)
     
     def physics_loss(self, t):
-        # avoid modifying the caller's tensor in-place
-        t_ = t.clone().detach().requires_grad_(True)
+        # ensure t is on same device as the model
+        device = next(self.parameters()).device
+        t_ = t.clone().detach().to(device).requires_grad_(True)
         y = self.forward(t_)
         dy_dt = torch.autograd.grad(y, t_, grad_outputs=torch.ones_like(y), create_graph=True)[0]
         d2y_dt2 = torch.autograd.grad(dy_dt, t_, grad_outputs=torch.ones_like(dy_dt), create_graph=True)[0]
@@ -58,23 +72,46 @@ class PINN(nn.Module):
         physics_residual = d2y_dt2 + G
         return torch.mean(physics_residual**2)
 
-    def bc_loss(self, t_start, t_end, y_start=0.0, y_end=0.0):
-        # enforce y(t_start)=y_start and y(t_end)=y_end
-        t0 = torch.tensor([[float(t_start)]], dtype=torch.float32)
-        tT = torch.tensor([[float(t_end)]], dtype=torch.float32)
+    def bc_loss(self, t_start, t_end, y_start=0.0, y_end=0.0, v_start=None):
+        """
+        Enforce y(t_start)=y_start and y(t_end)=y_end.
+        Optionally enforce initial velocity v_start (dy/dt at t_start).
+        """
+        device = next(self.parameters()).device
+        t0 = torch.tensor([[float(t_start)]], dtype=torch.float32, device=device).requires_grad_(True)
+        tT = torch.tensor([[float(t_end)]], dtype=torch.float32, device=device)
         y0 = self.forward(t0)
         yT = self.forward(tT)
-        return torch.mean((y0 - float(y_start))**2) + torch.mean((yT - float(y_end))**2)
-    
+        loss_pos = torch.mean((y0 - float(y_start))**2) + torch.mean((yT - float(y_end))**2)
+
+        loss_vel = torch.tensor(0.0, device=device)
+        if v_start is not None:
+            dy_dt = torch.autograd.grad(y0, t0, grad_outputs=torch.ones_like(y0), create_graph=True)[0]
+            loss_vel = torch.mean((dy_dt - float(v_start))**2)
+
+        return loss_pos + loss_vel
+
     def train_model(self, t: torch.Tensor, y: torch.Tensor, 
                     criterion, optimizer,
                     num_epochs=1000,
                     lambda_phys=1, 
-                    lambda_bc=0):
+                    lambda_bc=0,
+                    device: str = None,
+                    enforce_v0: float = None):
 
-        t_start = float(t.min())   # expects `t` from earlier (numpy array)
-        t_end = float(t.max())
+        if optimizer is None or criterion is None:
+            raise ValueError("Please provide optimizer and criterion to train_model")
 
+        # move model and data to device (infer from model if not given)
+        device = torch.device(device) if device else next(self.parameters()).device
+        self.to(device)
+        t = t.to(device)
+        y = y.to(device)
+
+        t_start = float(t.min().cpu().item())
+        t_end = float(t.max().cpu().item())
+
+        history = {'loss': []}
         for epoch in range(num_epochs):
             self.train()
             optimizer.zero_grad()
@@ -83,12 +120,13 @@ class PINN(nn.Module):
 
             # physics informed losses
             phys_loss = self.physics_loss(t)
-            bc_loss = self.bc_loss(t_start, t_end, y_start=0.0, y_end=0.0)
+            bc_loss = self.bc_loss(t_start, t_end, y_start=0.0, y_end=0.0, v_start=enforce_v0)
 
             loss = data_loss + lambda_phys * phys_loss + lambda_bc * bc_loss
             loss.backward()
             optimizer.step()
             
+            history['loss'].append(loss.item())
             if (epoch+1) % 100 == 0:
-                print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
-
+                print(f'Epoch [{epoch+1}/{num_epochs}], Total: {loss.item():.6f}, data: {data_loss.item():.6f}, phys: {phys_loss.item():.6f}, bc: {bc_loss.item():.6f}')
+        return history
