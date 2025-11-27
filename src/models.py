@@ -61,9 +61,9 @@ class PINN(nn.Module):
         return self.net(t)
     
     def physics_loss(self, t):
-        # ensure t is on same device as the model
-        device = next(self.parameters()).device
-        t_ = t.clone().detach().to(device).requires_grad_(True)
+        # Create a version of t that requires gradients for autograd
+        # Note: t should already be on the correct device from train_model()
+        t_ = t.detach().requires_grad_(True)
         y = self.forward(t_)
         dy_dt = torch.autograd.grad(y, t_, grad_outputs=torch.ones_like(y), create_graph=True)[0]
         d2y_dt2 = torch.autograd.grad(dy_dt, t_, grad_outputs=torch.ones_like(dy_dt), create_graph=True)[0]
