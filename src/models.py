@@ -118,15 +118,25 @@ class PINN(nn.Module):
             y_pred = self(t)
             data_loss = criterion(y_pred, y)
 
+            loss = data_loss
             # physics informed losses
-            phys_loss = self.physics_loss(t)
-            bc_loss = self.bc_loss(t_start, t_end, y_start=0.0, y_end=0.0, v_start=enforce_v0)
+            if lambda_phys > 0:
+                phys_loss = self.physics_loss(t)
+                loss += lambda_phys * phys_loss
 
-            loss = data_loss + lambda_phys * phys_loss + lambda_bc * bc_loss
+            if lambda_bc > 0:
+                bc_loss = self.bc_loss(t_start, t_end, y_start=0.0, y_end=0.0, v_start=enforce_v0)
+                loss += lambda_bc * bc_loss
+
             loss.backward()
             optimizer.step()
             
             history['loss'].append(loss.item())
             if (epoch+1) % 100 == 0:
-                print(f'Epoch [{epoch+1}/{num_epochs}], Total: {loss.item():.6f}, data: {data_loss.item():.6f}, phys: {phys_loss.item():.6f}, bc: {bc_loss.item():.6f}')
+                log_msg = f'Epoch [{epoch+1}/{num_epochs}], Total: {loss.item():.6f}, data: {data_loss.item():.6f}'
+                if lambda_phys > 0:
+                    log_msg += f', phys: {phys_loss.item():.6f}'
+                if lambda_bc > 0:
+                    log_msg += f', bc: {bc_loss.item():.6f}'
+                print(log_msg)
         return history
